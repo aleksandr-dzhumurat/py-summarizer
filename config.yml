@@ -3,24 +3,24 @@
 # Import section for controlling import output
 import:
   # Include relative imports (from .module import ...)
-  relative_imports: false
-  absolute_imports: false
+  relative_imports: true
+  absolute_imports: true
 
 # Skeleton generation options
 # Class-related configuration (hierarchical)
 classes:
   # Include class definitions in skeleton output (default: true)
   # When false, skips classes entirely
-  definitions: false
+  definitions: true
   
   # Include class methods in skeleton output (default: false)
   # When false, only shows class names without their methods
   # Note: Only applies if definitions is true
-  methods: false
+  methods: true
 
 # Include function definitions in skeleton output (default: true)
 # When false, skips functions entirely
-functions: false
+functions: true
 
 # Maximum length for docstring previews in skeleton (characters)
 max_docstring_length: 120
