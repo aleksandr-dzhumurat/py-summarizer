@@ -15,15 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Set
 
+from .code_graph import check_function_important, extract_classes
 from .utils import (
     clean_markdown_text,
     get_absolute_imports_flag,
     get_class_definitions_flag,
     get_class_methods_flag,
     get_functions_flag,
+    get_logger,
+    get_path,
     get_relative_imports_flag,
-    get_skipped_dirs,
+    short_doc,
 )
+
+logger = get_logger(__name__)
 
 # Cache stdlib modules once at module load time (Python 3.10+)
 STDLIB_MODULES: Set[str] = sys.stdlib_module_names
@@ -43,7 +48,7 @@ class Part:
 
 
 @dataclass
-class Row:
+class SkeletonEntry:
     source: str
     file_type: str  # 'doc' or 'code'
     content: List[Part]
@@ -82,39 +87,10 @@ def _format_arguments(args: ast.arguments) -> str:
     return ", ".join(parts)
 
 
-def _short_doc(node: ast.AST, max_len: int = 120) -> str:
-    doc = ast.get_docstring(node) or ""
-    if not doc:
-        return ""
-    one = doc.strip().splitlines()[0]
-    return (one[: max_len - 3] + "...") if len(one) > max_len else one
-
-
 def _is_stdlib_module(module_name: str) -> bool:
     """Check if a module name is from the Python standard library."""
     top_level = module_name.split(".")[0]
     return top_level in STDLIB_MODULES
-
-
-def _resolve_file_path(fp: str, root_dir: str | None) -> Path | None:
-    """Resolve file path, trying root_dir and cwd. Returns None if not found."""
-    p = Path(fp)
-    if p.exists():
-        return p
-    
-    if not p.is_absolute() and root_dir:
-        p = Path(root_dir) / fp
-        if p.exists():
-            return p
-    
-    p = Path.cwd() / fp
-    return p if p.exists() else None
-
-
-def _should_skip_by_dir(path: Path) -> bool:
-    """Check if path contains any skipped directory."""
-    skipped_dirs = get_skipped_dirs()
-    return any(any(skip_dir in part.lower() for skip_dir in skipped_dirs) for part in path.parts)
 
 
 def _collect_imports(tree: ast.AST) -> dict:
@@ -148,8 +124,9 @@ def _extract_module_docstring(tree: ast.AST) -> Part | None:
     doc = ast.get_docstring(tree)
     if not doc:
         return None
-    first_line = doc.strip().splitlines()[0]
-    text = f"{first_line[:197]}..." if len(first_line) > 200 else first_line
+    # Convert multi-line docstring to single line by replacing newlines with '. '
+    single_line = doc.strip().replace('\n', '. ').replace('  ', ' ')
+    text = f"{single_line[:197]}..." if len(single_line) > 200 else single_line
     return Part(type=PART_DOCSTRING, text=text)
 
 
@@ -169,61 +146,61 @@ def _extract_functions(tree: ast.AST) -> List[Part]:
     parts: List[Part] = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if not node.name.startswith("_"):
+            if check_function_important(node):
                 sig = _format_arguments(node.args)
-                doc = _short_doc(node)
-                parts.append(Part(type=PART_FUNCTION, text=f"{node.name}({sig}) -> {doc}"))
+                return_type = ast.unparse(node.returns) if node.returns else ""
+                doc = short_doc(node)
+                
+                func_text = f"{node.name}({sig})"
+                if return_type:
+                    func_text += f" -> {return_type}"
+                if doc:
+                    func_text += f" | {doc}"
+                parts.append(Part(type=PART_FUNCTION, text=func_text))
     return parts
 
 
 def _extract_classes(tree: ast.AST) -> List[Part]:
-    """Extract class definitions and their methods as Parts."""
+    """Extract class definitions (including nested) and their methods as Parts."""
     parts: List[Part] = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            if node.name.startswith("_"):
+    classes_info = extract_classes(tree)
+
+    for class_info in classes_info:
+        cls_text = f"{class_info.name}: {class_info.docstring}" if class_info.docstring else class_info.name
+        parts.append(Part(type=PART_CLASS, text=cls_text))
+
+        for method in class_info.methods:
+            if method.name.startswith("_"):
                 continue
-            
-            cls_doc = _short_doc(node)
-            cls_text = f"{node.name}: {cls_doc}" if cls_doc else node.name
-            parts.append(Part(type=PART_CLASS, text=cls_text))
-            
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if not item.name.startswith("_"):
-                        sig = _format_arguments(item.args)
-                        doc = _short_doc(item)
-                        parts.append(Part(type=PART_FUNCTION, text=f"{node.name}.{item.name}({sig}) -> {doc}"))
+
+            method_text = f"{class_info.name}.{method.name}({method.signature})"
+            if method.return_type:
+                method_text += f" -> {method.return_type}"
+            if method.docstring:
+                method_text += f" | {method.docstring}"
+            parts.append(Part(type=PART_FUNCTION, text=method_text))
+
     return parts
 
 
-def process_code(fp: str, root_dir: str | None = None) -> List[Row]:
+def process_code(file_path: Path) -> List[SkeletonEntry]:
     """Process a single Python file and extract its structure.
     
     Args:
-        fp: File path (relative or absolute)
-        root_dir: Root directory to resolve relative paths
+        file_path: Resolved Path object to the file
         
     Returns:
-        List of output lines for this file
+        List of SkeletonEntry for this file
     """
-    p = Path(fp)
-    if _should_skip_by_dir(p):
-        return []
-    
-    resolved_path = _resolve_file_path(fp, root_dir)
-    if not resolved_path:
-        return [Row(source=fp, file_type="code", content=[Part(type=PART_DOCSTRING, text=f"# Skipped (missing): {fp}")])]
-    
     try:
-        src = resolved_path.read_text(encoding="utf-8", errors="ignore")
+        src = file_path.read_text(encoding="utf-8", errors="ignore")
         tree = ast.parse(src)
     except Exception as e:
-        return [Row(source=fp, file_type="code", content=[Part(type=PART_DOCSTRING, text=f"# Failed to parse {fp}: {e}")])]
+        logger.warning(f"Failed to parse {file_path}: {e}")
+        return []
     
     content: List[Part] = []
 
-    # Flat is better than nested - collect all parts
     if doc_part := _extract_module_docstring(tree):
         content.append(doc_part)
     
@@ -231,43 +208,35 @@ def process_code(fp: str, root_dir: str | None = None) -> List[Row]:
     content.extend(_extract_functions(tree))
     content.extend(_extract_classes(tree))
 
-    return [Row(source=fp, file_type="code", content=content)]
+    return [SkeletonEntry(source=str(file_path), file_type="code", content=content)]
 
 
-def process_doc(fp: str, root_dir: str | None = None) -> List[Row]:
+def process_doc(file_path: Path) -> List[SkeletonEntry]:
     """Process a single documentation file (.md, .rst, .txt).
     
     Args:
-        fp: File path (relative or absolute)
-        root_dir: Root directory to resolve relative paths
+        file_path: Resolved Path object to the file
         
     Returns:
-        List of output lines for this file
+        List of SkeletonEntry for this file
     """
-    p = Path(fp)
-    
-    # Skip system/config files
+    p = Path(file_path)
     if p.name.upper().startswith(('LICENSE', 'SKELETON', 'CODEOWNERS', 'SECURITY', 'REQUIREMENTS')):
         return []
-    
-    if _should_skip_by_dir(p):
-        return []
-    
-    resolved_path = _resolve_file_path(fp, root_dir)
-    if not resolved_path:
-        return [Row(source=fp, file_type="doc", content=[Part(type=PART_DOCSTRING, text=f"# Skipped (missing): {fp}")])]
-    
     try:
-        content = resolved_path.read_text(encoding="utf-8", errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
         cleaned = clean_markdown_text(content)
         
         if not cleaned:
-            return [Row(source=fp, file_type="doc", content=[])]
+            return [SkeletonEntry(source=str(file_path), file_type="doc", content=[])]
         
-        preview = cleaned[:500] + "..." if len(cleaned) > 500 else cleaned
-        return [Row(source=fp, file_type="doc", content=[Part(type=PART_DOCSTRING, text=preview)])]
+        # Convert multi-line docstring to single line by replacing newlines with '. '
+        cleaned_single_line = cleaned.replace('\n', '. ').replace('  ', ' ').strip()
+        preview = cleaned_single_line[:500] + "..." if len(cleaned_single_line) > 500 else cleaned_single_line
+        return [SkeletonEntry(source=str(file_path), file_type="doc", content=[Part(type=PART_DOCSTRING, text=preview)])]
     except Exception as e:
-        return [Row(source=fp, file_type="doc", content=[Part(type=PART_DOCSTRING, text=f"# Failed to read {fp}: {e}")])]
+        logger.warning(f"Failed to read {file_path}: {e}")
+        return []
 
 
 def import_summarize(import_parts: List[Part]) -> str:
@@ -300,7 +269,7 @@ def _should_include_part(part: Part, flags: dict) -> bool:
     return True  # docstrings always included
 
 
-def filter_rows(rows: List[Row]) -> List[Row]:
+def filter_rows(rows: List[SkeletonEntry]) -> List[SkeletonEntry]:
     """Filter row content based on configuration flags."""
     flags = {
         "include_functions": get_functions_flag(),
@@ -310,30 +279,28 @@ def filter_rows(rows: List[Row]) -> List[Row]:
         "include_abs": get_absolute_imports_flag(),
     }
     
-    filtered: List[Row] = []
+    filtered: List[SkeletonEntry] = []
     for row in rows:
         if row.file_type != "code":
             filtered.append(row)
             continue
         
         new_parts = [p for p in row.content if _should_include_part(p, flags)]
-        filtered.append(Row(source=row.source, file_type=row.file_type, content=new_parts))
+        filtered.append(SkeletonEntry(source=row.source, file_type=row.file_type, content=new_parts))
     
     return filtered
 
 
-def _render_rows(rows: List[Row], header: str = "") -> str:
-    """Render rows into formatted text output."""
+def _render_rows(rows: List[SkeletonEntry], header: str = "") -> str:
+    """Render rows into valid YAML format with folded block scalars for docstrings."""
     lines: List[str] = []
     if header:
-        lines.extend([header, ""])
+        lines.append(header)
+        lines.append("")
     
     for row in rows:
-        # Skip rows with placeholder content
         if row.content and ': (none)' in row.content[0].text:
             continue
-        
-        # Add file header
         prefix = "File" if row.file_type == "code" else "Documentation"
         lines.append(f"{prefix}: {row.source}")
         
@@ -355,22 +322,38 @@ def _render_rows(rows: List[Row], header: str = "") -> str:
             elif p.type == PART_CLASS:
                 by_type[PART_CLASS].append(p.text)
         
-        # Render each section
+        # Render each section as YAML
+        # Docstring: use folded block scalar (>) for long content, otherwise inline
         if by_type[PART_DOCSTRING]:
-            lines.append("Docstring:")
-            lines.extend(f"  {text}" for text in by_type[PART_DOCSTRING])
+            docstring_text = " ".join(by_type[PART_DOCSTRING])
+            if len(docstring_text) > 120:
+                lines.append("Docstring: >")
+                # Wrap text at ~80 chars while preserving word boundaries
+                words = docstring_text.split()
+                current_line = []
+                for word in words:
+                    test_line = " ".join(current_line + [word])
+                    if len(test_line) > 80 and current_line:
+                        lines.append(f"  {' '.join(current_line)}")
+                        current_line = [word]
+                    else:
+                        current_line.append(word)
+                if current_line:
+                    lines.append(f"  {' '.join(current_line)}")
+            else:
+                lines.append(f"Docstring: {docstring_text!r}")
         
         if by_type["imports"]:
             lines.append("Imports:")
             lines.extend(f"  - {im}" for im in by_type["imports"])
         
-        if by_type[PART_FUNCTION]:
-            lines.append("Functions:")
-            lines.extend(f"  - {f}" for f in by_type[PART_FUNCTION])
-        
         if by_type[PART_CLASS]:
             lines.append("Classes:")
             lines.extend(f"  - {c}" for c in by_type[PART_CLASS])
+        
+        if by_type[PART_FUNCTION]:
+            lines.append("Functions:")
+            lines.extend(f"  - {f}" for f in by_type[PART_FUNCTION])
         
         lines.append("")
     
@@ -384,17 +367,18 @@ def code_skeleton(index: List[dict], root_dir: str | None = None) -> str:
     Python files (.py) are processed with process_code().
     Documentation files (.md, .rst, .txt) are processed with process_doc().
     """
-    rows: List[Row] = []
+    rows: List[SkeletonEntry] = []
 
     for entry in index:
-        fp = entry.get("file_path")
-        if not fp:
+        file_path = get_path(entry, root_dir)
+        if not file_path:
             continue
         
+        fp = entry.get("file_path")
         if fp.endswith(".py"):
-            rows.extend(process_code(fp, root_dir))
+            rows.extend(process_code(file_path))
         elif fp.endswith((".md", ".rst", ".txt")):
-            rows.extend(process_doc(fp, root_dir))
+            rows.extend(process_doc(file_path))
         # Other file types are silently skipped
 
     # Generate header from absolute imports before filtering
@@ -406,4 +390,4 @@ def code_skeleton(index: List[dict], root_dir: str | None = None) -> str:
     return _render_rows(rows, header=header)
 
 
-__all__ = ["code_skeleton", "process_code", "process_doc", "Row", "Part"]
+__all__ = ["code_skeleton", "process_code", "process_doc", "SkeletonEntry", "Part"]

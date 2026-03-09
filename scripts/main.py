@@ -54,7 +54,9 @@ async def run(repo_url: str) -> int:
         print("\n=== Skeleton preview ===\n")
         print(preview)
 
-        out_file = path / "SKELETON.txt"
+        analysis_dir = path / ".analysis"
+        analysis_dir.mkdir(exist_ok=True)
+        out_file = analysis_dir / "skeleton.txt"
         out_file.write_text(skeleton_text, encoding="utf-8")
         print(f"Full skeleton written to: {out_file}")
     except Exception as e:

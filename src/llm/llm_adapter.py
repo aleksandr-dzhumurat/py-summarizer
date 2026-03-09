@@ -6,7 +6,7 @@ Supports structured output using Pydantic schemas for reliable, type-safe respon
 
 import json
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import tiktoken
@@ -185,4 +185,63 @@ class DeepSeekLLMAdapter:
 
 __all__ = [
     "DeepSeekLLMAdapter",
+    "summarize_with_llm",
 ]
+
+
+def summarize_with_llm(
+    skeletons: list[Any],
+    graph_analysis: Any,
+    external_deps: list[str],
+    entry_points: list[str],
+    api_key: Optional[str] = None,
+) -> str:
+    if not api_key:
+        return "No LLM summary (API key not provided)"
+
+    top_files = sorted(skeletons, key=lambda s: s.line_count, reverse=True)[:15]
+    file_summary = "\n".join(
+        [
+            f"- {s.file} ({s.line_count} lines, {len(s.functions)} functions, {len(s.classes)} classes)"
+            for s in top_files
+        ]
+    )
+
+    prompt = f"""
+Analyze this Python codebase and write a 4-6 sentence architectural summary.
+
+KEY FILES:
+{file_summary}
+
+CALL GRAPH ANALYSIS:
+- Most called functions: {graph_analysis.most_called[:5]}
+- Utility functions: {graph_analysis.utilities[:5]}
+- Orchestrators: {graph_analysis.orchestrators[:5]}
+- Max call depth: {graph_analysis.max_call_depth}
+- Circular dependencies: {graph_analysis.circular_dependencies}
+
+ENTRY POINTS:
+{', '.join(entry_points[:5]) if entry_points else 'None found'}
+
+EXTERNAL DEPENDENCIES:
+{', '.join(external_deps[:15])}
+
+Write a concise summary covering:
+1. What the project does (infer from structure)
+2. Architecture pattern (layered, monolith, etc)
+3. Key components and their roles
+4. Notable patterns or complexity
+"""
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        return f"LLM summarization failed: {str(exc)}"

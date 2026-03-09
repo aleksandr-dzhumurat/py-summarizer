@@ -27,6 +27,21 @@ uv pip install -r requirements.txt
 Configure [`config.yml`](config.yml) to customize skeleton generation (imports, functions, classes, directories to skip, etc.).
 
 
+```yaml
+import:
+  relative_imports: true
+  absolute_imports: true
+
+classes:
+  definitions: true
+  methods: true
+
+functions: true
+
+max_docstring_length: 120
+```
+
+
 ### 2. Usage
 
 Start the FastAPI server:

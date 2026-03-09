@@ -183,10 +183,8 @@ async def run_pipeline(task_id: str, repo_url: str) -> dict:
         # Clone repository
         repo_path = await clone_repo(repo_url, timeout=180)
         
-        # Index files (filtered by config)
         index = get_index(str(repo_path))
         
-        # Generate code skeleton
         skeleton = code_skeleton(index, str(repo_path))
         
         # LLM summarization

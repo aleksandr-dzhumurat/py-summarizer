@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 from typing import Optional
 
@@ -120,6 +121,54 @@ def get_skipped_dirs(config_path: Optional[Path] = None) -> list[str]:
     """
     config = load_config(config_path)
     return config.get("skipped_dirs", [])
+
+
+def short_doc(node: ast.AST, max_len: int = 120) -> str:
+    """Return first docstring line truncated to `max_len` characters."""
+    doc = ast.get_docstring(node) or ""
+    if not doc:
+        return ""
+    first_line = doc.strip().splitlines()[0]
+    return (first_line[: max_len - 3] + "...") if len(first_line) > max_len else first_line
+
+
+def resolve_file_path(fp: str, root_dir: str | None) -> Path | None:
+    """Resolve file path by trying raw path, root_dir-relative, then cwd-relative."""
+    path = Path(fp)
+    if path.exists():
+        return path
+
+    if not path.is_absolute() and root_dir:
+        path = Path(root_dir) / fp
+        if path.exists():
+            return path
+
+    path = Path.cwd() / fp
+    return path if path.exists() else None
+
+
+def should_skip_by_dir(path: Path) -> bool:
+    """Return True when any path segment matches configured skipped dirs."""
+    skipped_dirs = get_skipped_dirs()
+    return any(any(skip_dir in part.lower() for skip_dir in skipped_dirs) for part in path.parts)
+
+
+def get_path(entry: dict, root_dir: str | None = None) -> Path | None:
+    """Resolve and validate file path from index entry with skip rules and logging."""
+    fp = entry.get("file_path")
+    if not fp:
+        return None
+
+    path = Path(fp)
+    if should_skip_by_dir(path):
+        return None
+
+    resolved_path = resolve_file_path(fp, root_dir)
+    if not resolved_path:
+        get_logger(__name__).warning(f"Skipped (missing): {fp}")
+        return None
+
+    return resolved_path
 
 
 def get_class_definitions_flag(config_path: Optional[Path] = None) -> bool:
@@ -303,4 +352,16 @@ async def clone_repo(repo_url: str, timeout: int = 120) -> Path:
     return Path(target_path)
 
 
-__all__ = ["get_logger", "clone_repo", "load_config", "get_skipped_dirs", "get_class_methods_flag", "get_text_extensions", "get_index"]
+__all__ = [
+    "get_logger",
+    "clone_repo",
+    "load_config",
+    "get_skipped_dirs",
+    "get_class_methods_flag",
+    "get_text_extensions",
+    "get_index",
+    "short_doc",
+    "resolve_file_path",
+    "should_skip_by_dir",
+    "get_path",
+]
