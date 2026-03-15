@@ -9,8 +9,8 @@ import json
 import sys
 
 from src.llm import DeepSeekLLMAdapter
-from src.naive_skeleton import code_skeleton
-from src.utils import clone_repo, get_index
+from src.py_summarizer.naive_skeleton import code_skeleton
+from src.py_summarizer.utils import clone_repo, get_index
 
 # Default repo if none provided via CLI
 DEFAULT_REPO_URL = "https://github.com/databricks-solutions/ai-dev-kit"
