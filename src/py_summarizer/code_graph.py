@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-from src.llm.llm_adapter import summarize_with_llm
 from .naive_skeleton import check_class_important, check_function_important, extract_classes, ClassInfo, MethodInfo
-from .utils import get_index, get_logger, get_path
+from .utils import generate_summarization_prompt, get_index, get_logger, get_path
 
 logger = get_logger(__name__)
 
@@ -170,7 +169,10 @@ class RepoSummary:
     entry_points: List[str]
     external_dependencies: List[str]
     graph_analysis: GraphAnalysis
+<<<<<<< HEAD
     summary: str
+=======
+>>>>>>> 0cedfd6 (Skeleton improvements)
 
 
 def extract_functions(tree: ast.AST) -> List[str]:
@@ -533,7 +535,11 @@ def analyze_call_graph(graph: DiGraph) -> GraphAnalysis:
     )
 
 
+<<<<<<< HEAD
 def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[RepoSummary, DiGraph, DiGraph]:
+=======
+def analyze_repository(repo_path: str) -> Tuple[RepoSummary, DiGraph, DiGraph, str]:
+>>>>>>> 0cedfd6 (Skeleton improvements)
     repo_root = Path(repo_path).resolve()
 
     if not repo_root.exists():
@@ -592,8 +598,13 @@ def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[R
     top_deps = [dep for dep, _ in dep_counts.most_common(20)]
     entry_points = find_entry_points(repo_root)
 
+<<<<<<< HEAD
     print("Step 6: Generating LLM summary...")
     summary = summarize_with_llm(skeletons, graph_analysis, top_deps, entry_points, api_key)
+=======
+    print("Step 6: Building summarization prompt...")
+    rendered_prompt = generate_summarization_prompt(skeletons, graph_analysis, top_deps, entry_points)
+>>>>>>> 0cedfd6 (Skeleton improvements)
 
     repo_summary = RepoSummary(
         repo_path=str(repo_root),
@@ -604,10 +615,9 @@ def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[R
         entry_points=entry_points,
         external_dependencies=top_deps,
         graph_analysis=graph_analysis,
-        summary=summary,
     )
-    
-    return repo_summary, call_graph, import_graph
+
+    return repo_summary, call_graph, import_graph, rendered_prompt
 
 
 def export_json(summary: RepoSummary, output_path: Path) -> None:
@@ -628,7 +638,6 @@ def export_json(summary: RepoSummary, output_path: Path) -> None:
             "max_call_depth": summary.graph_analysis.max_call_depth,
             "circular_dependencies": summary.graph_analysis.circular_dependencies,
         },
-        "summary": summary.summary,
     }
 
     with open(output_path, "w", encoding="utf-8") as file_obj:
@@ -639,10 +648,6 @@ def export_json(summary: RepoSummary, output_path: Path) -> None:
 
 def export_markdown(summary: RepoSummary, output_path: Path) -> None:
     markdown_text = f"""# Repository Analysis
-
-## Summary
-
-{summary.summary}
 
 ## Statistics
 

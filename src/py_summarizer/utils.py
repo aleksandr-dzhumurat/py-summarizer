@@ -2,15 +2,13 @@
 
 import ast
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 from pathlib import Path
 from typing import Optional
-
-import yaml
-
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
     """Return a configured logger for the application.
@@ -33,17 +31,16 @@ logger = get_logger(__name__)
 
 
 def load_config(config_path: Optional[Path] = None) -> dict:
-    """Load configuration from YAML file.
+    """Load configuration from JSON file.
 
     Args:
-        config_path: Path to config.yml. If None, looks for config.yml in project root.
+        config_path: Path to config.json. If None, looks for config.json in project root.
 
     Returns:
         Dictionary containing configuration settings.
     """
     if config_path is None:
-        current_dir = Path(__file__).parent.parent
-        config_path = current_dir / "config.yml"
+        config_path = Path(__file__).parent / "config.json"
 
     if not config_path.exists():
         logger.warning(f"Config file not found at {config_path}, using defaults")
@@ -56,8 +53,7 @@ def load_config(config_path: Optional[Path] = None) -> dict:
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        return config or {}
+            return json.load(f)
     except Exception as e:
         logger.error(f"Failed to load config from {config_path}: {e}")
         return {
@@ -135,7 +131,7 @@ def short_doc(node: ast.AST, max_len: int = 120) -> str:
     return (first_line[: max_len - 3] + "...") if len(first_line) > max_len else first_line
 
 
-def resolve_file_path(fp: str, root_dir: str | None) -> Path | None:
+def resolve_file_path(fp: str, root_dir: Optional[str]) -> Optional[Path]:
     """Resolve file path by trying raw path, root_dir-relative, then cwd-relative."""
     path = Path(fp)
     if path.exists():
@@ -154,7 +150,7 @@ def should_skip_by_dir(path: Path) -> bool:
     return any(any(skip_dir in part.lower() for skip_dir in skipped_dirs) for part in path.parts)
 
 
-def get_path(entry: dict, root_dir: str | None = None) -> Path | None:
+def get_path(entry: dict, root_dir: Optional[str] = None) -> Optional[Path]:
     """Resolve and validate file path from index entry with skip rules and logging."""
     fp = entry.get("file_path")
     if not fp:
@@ -179,9 +175,9 @@ def get_index(root_dir_path: str) -> list[dict[str, str]]:
     - Walks the directory tree recursively.
     - Skips any file or directory whose name starts with a dot (`.`).
     - Skips any files under a `__pycache__` directory.
-    - Skips directories configured in skipped_dirs (from config.yml).
+    - Skips directories configured in skipped_dirs (from config.json).
     - Filters files by extension: if a file has an extension, it must be
-      one of the extensions listed in text_extensions (from config.yml).
+      one of the extensions listed in text_extensions (from config.json).
       Files without an extension are included (treated as text).
     """
     root = Path(root_dir_path).resolve()
@@ -260,6 +256,45 @@ async def clone_repo(repo_url: str, timeout: int = 120) -> Path:
     return Path(target_path)
 
 
+def generate_summarization_prompt(
+    skeletons: list,
+    graph_analysis,
+    external_deps: list[str],
+    entry_points: list[str],
+) -> str:
+    """Build the LLM prompt for architectural summarization from repo analysis data."""
+    top_files = sorted(skeletons, key=lambda s: s.line_count, reverse=True)[:15]
+    file_summary = "\n".join(
+        f"- {s.file} ({s.line_count} lines, {len(s.functions)} functions, {len(s.classes)} classes)"
+        for s in top_files
+    )
+    return f"""
+Analyze this Python codebase and write a 4-6 sentence architectural summary.
+
+KEY FILES:
+{file_summary}
+
+CALL GRAPH ANALYSIS:
+- Most called functions: {graph_analysis.most_called[:5]}
+- Utility functions: {graph_analysis.utilities[:5]}
+- Orchestrators: {graph_analysis.orchestrators[:5]}
+- Max call depth: {graph_analysis.max_call_depth}
+- Circular dependencies: {graph_analysis.circular_dependencies}
+
+ENTRY POINTS:
+{', '.join(entry_points[:5]) if entry_points else 'None found'}
+
+EXTERNAL DEPENDENCIES:
+{', '.join(external_deps[:15])}
+
+Write a concise summary covering:
+1. What the project does (infer from structure)
+2. Architecture pattern (layered, monolith, etc)
+3. Key components and their roles
+4. Notable patterns or complexity
+"""
+
+
 __all__ = [
     "get_logger",
     "clone_repo",
@@ -272,4 +307,5 @@ __all__ = [
     "resolve_file_path",
     "should_skip_by_dir",
     "get_path",
+    "generate_summarization_prompt",
 ]

@@ -1,0 +1,79 @@
+{
+  "import": {
+    "relative_imports": true,
+    "absolute_imports": true
+  },
+  "classes": {
+    "definitions": true,
+    "methods": true
+  },
+  "functions": true,
+  "max_docstring_length": 120,
+  "clone_timeout": 180,
+  "clone_depth": 1,
+  "cleanup_repo_after_processing": true,
+  "llm": {
+    "model": "deepseek-ai/DeepSeek-V3.2",
+    "api_base": "https://api.tokenfactory.nebius.com/v1/chat/completions",
+    "timeout": 60,
+    "max_prompt_tokens": 50000,
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "title": "GitHub Repository Summarizer",
+    "description": "Analyze GitHub repositories and generate LLM-based summaries",
+    "version": "0.1.0"
+  },
+  "skipped_dirs": [
+    "example",
+    "examples",
+    "test",
+    "tests",
+    "contrib",
+    "docs",
+    "doc",
+    "skills",
+    ".git",
+    ".github",
+    "node_modules",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    "vendor",
+    ".tox",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "build",
+    "dist",
+    "*.egg-info"
+  ],
+  "skipped_patterns": [
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    ".DS_Store"
+  ],
+  "text_extensions": [
+    ".py",
+    ".txt",
+    ".md",
+    ".rst",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".csv",
+    ".pyi",
+    ".html",
+    ".htm",
+    ".css",
+    ".js"
+  ]
+}

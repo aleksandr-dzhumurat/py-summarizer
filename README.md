@@ -7,7 +7,7 @@ Supports deployment as either a FastAPI service or an agent skill.
 Summarizing any python module
 
 ```shell
-PYTHONPATH=$(pwd)/src/py_summarizer python3 -m src.py_summarizer.naive_skeleton /Users/adzhumurat/PycharmProjects/ai_product_engineer/src/assistant
+PYTHONPATH=$(pwd)/src python3 -m py_summarizer.naive_skeleton /Users/adzhumurat/PycharmProjects/ai_product_engineer/src/assistant
 ```
 
 # Agentic skill
@@ -20,10 +20,10 @@ source files into context.
 ### Install from Gist (no clone needed)
 
 ```bash
-mkdir -p ~/.claude/skills/py-summarizer
-for f in SKILL.md naive_skeleton.py utils.py; do
+mkdir -p ~/.claude/skills/py_summarizer
+for f in SKILL.md naive_skeleton.py utils.py code_graph.py __main__.py config.json skill_requirements.txt; do
   curl -sL "https://gist.githubusercontent.com/aleksandr-dzhumurat/b4435219cca6b1869e0257ef42420273/raw/$f" \
-    -o ~/.claude/skills/py-summarizer/$f
+    -o ~/.claude/skills/py_summarizer/$f
 done
 ```
 
@@ -35,11 +35,6 @@ Restart Claude Code after installation. Then ask:
 ```bash
 bash install.sh
 ```
-
-This copies `src/py_summarizer/` into `~/.claude/skills/repo-summarizer/`.
-
-## Install
-
 
 ## Dependencies
 
@@ -53,19 +48,15 @@ Set your Anthropic API key for the architectural summary step:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Configure [`config.yml`](config.yml) to adjust what the skeleton includes
+Configure [`config.json`](src/py_summarizer/config.json) to adjust what the skeleton includes
 (imports, functions, classes, directories to skip):
 
-```yaml
-import:
-  relative_imports: true
-  absolute_imports: true
-
-classes:
-  definitions: true
-  methods: true
-
-functions: true
+```json
+{
+  "import": { "relative_imports": true, "absolute_imports": true },
+  "classes": { "definitions": true, "methods": true },
+  "functions": true
+}
 ```
 
 ## Manual usage (without the skill)
@@ -73,17 +64,13 @@ functions: true
 Generate code skeleton for the current directory:
 
 ```bash
-PYTHONPATH=$(pwd) python3 -c "
-import asyncio; from pathlib import Path
-from src.py_summarizer.naive_skeleton import skeleton_pipeline
-asyncio.run(skeleton_pipeline(Path('.')))
-"
+PYTHONPATH=$(pwd)/src python3 -m py_summarizer.naive_skeleton .
 ```
 
 Generate call graph and architectural summary:
 
 ```bash
-DATA_DIR=. PYTHONPATH=$(pwd) python3 scripts/generate_code_graph.py .
+PYTHONPATH=$(pwd)/src DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
 ```
 
 Output is written to `.analysis/` — `skeleton.md`, `graphs.json`, `ANALYSIS.md`.
@@ -142,11 +129,9 @@ This runs a smoke test that checks the health endpoint and submits a summarizati
 ## Project Structure
 
 - `src/app.py` - FastAPI application
-- `src/utils.py` - Utility functions (logging, cloning)
-- `src/crawler/` - Repository indexing and skeleton generation
+- `src/py_summarizer/` - Code skeleton and graph analysis
 - `src/llm/` - LLM adapter and prompts
-- `scripts/main.py` - CLI entry point
-- `scripts/test_api.py` - API testing script
+- `scripts/` - CLI entry points
 - `data/` - Cloned repositories storage
 
 
