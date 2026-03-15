@@ -2,24 +2,31 @@
 """
 Repository Code Graph Analyzer
 
-Analyzes repository structure and generates call graphs, import graphs,
-and architectural summaries.
+Extracts AST skeletons, resolves call/inheritance edges, builds call and import
+graphs, and saves results to <repo>/.analysis/:
+
+    summary.json        - repo stats and graph analysis
+    ANALYSIS.md         - markdown report
+    graphs.json         - serialized call and import graphs
+    rendered_prompt.txt - LLM-ready summarization prompt
+
+To generate an LLM summary from the prompt, run generate_llm_summary.py next.
 
 Usage:
-    python3 scripts/generate_code_graph.py <repo_path> [--api-key YOUR_KEY]
-    
+    python3 scripts/generate_code_graph.py <repo_path>
+
 Environment variables:
     DATA_DIR: Directory where repositories are located (required)
-    
+
 Example:
-     PYTHONPATH=$(pwd)  DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
+    PYTHONPATH=$(pwd)/src DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
 """
 
 import os
 import sys
 from pathlib import Path
 
-from src.py_summarizer.code_graph import (
+from py_summarizer.code_graph import (
     analyze_repository,
     export_graph,
     export_json,
@@ -51,17 +58,7 @@ def main() -> int:
         print(f"Error: Repository path does not exist: {repo_path}", file=sys.stderr)
         return 1
 
-    api_key = None
-    if "--api-key" in sys.argv:
-        idx = sys.argv.index("--api-key")
-        if idx + 1 >= len(sys.argv):
-            print("Error: --api-key provided without value")
-            return 1
-        api_key = sys.argv[idx + 1]
-    else:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-
-    summary, call_graph, import_graph = analyze_repository(str(repo_path), api_key)
+    summary, call_graph, import_graph, rendered_prompt = analyze_repository(str(repo_path))
 
     output_dir = Path(repo_path) / ".analysis"
     output_dir.mkdir(exist_ok=True)
@@ -70,10 +67,13 @@ def main() -> int:
     export_markdown(summary, output_dir / "ANALYSIS.md")
     export_graph(call_graph, import_graph, output_dir / "graphs.json")
 
+    prompt_path = output_dir / "rendered_prompt.txt"
+    prompt_path.write_text(rendered_prompt, encoding="utf-8")
+    print(f"Saved rendered prompt to: {prompt_path}")
+
     print("\n" + "=" * 70)
     print("ANALYSIS COMPLETE")
     print("=" * 70)
-    print(f"\nSummary:\n{summary.summary}\n")
     print(f"Results saved to: {output_dir}")
     return 0
 
