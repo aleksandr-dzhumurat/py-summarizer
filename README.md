@@ -4,28 +4,57 @@ A tool that clones GitHub repositories, analyzes their structure, and generates 
 
 Supports deployment as either a FastAPI service or an agent skill.
 
-## Setup
+Summarizing any python module
 
-### 1. Environment Configuration
-
-Create a `.env` file with required configuration:
-
-```bash
-NEBIUS_API_KEY=your_api_key_here
-MAX_PROMPT_TOKENS=6000
-# this vas is used by API testing scripts
-REPO=https://github.com/psf/requests
-```
-Install dependencies and activate env
-
-```bash
-uv venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
+```shell
+PYTHONPATH=$(pwd)/src/py_summarizer python3 -m src.py_summarizer.naive_skeleton /Users/adzhumurat/PycharmProjects/ai_product_engineer/src/assistant
 ```
 
-Configure [`config.yml`](config.yml) to customize skeleton generation (imports, functions, classes, directories to skip, etc.).
+# Agentic skill
 
+The `repo-summarizer` skill teaches Claude to analyze any Python repository
+in the current working directory: generating a structural code skeleton,
+call/import graphs, and an LLM architectural summary — without loading raw
+source files into context.
+
+### Install from Gist (no clone needed)
+
+```bash
+mkdir -p ~/.claude/skills/py-summarizer
+for f in SKILL.md naive_skeleton.py utils.py; do
+  curl -sL "https://gist.githubusercontent.com/aleksandr-dzhumurat/b4435219cca6b1869e0257ef42420273/raw/$f" \
+    -o ~/.claude/skills/py-summarizer/$f
+done
+```
+
+Restart Claude Code after installation. Then ask:
+> "Analyze this codebase" or "Summarize the repo"
+
+### Install from source
+
+```bash
+bash install.sh
+```
+
+This copies `src/py_summarizer/` into `~/.claude/skills/repo-summarizer/`.
+
+## Install
+
+
+## Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Set your Anthropic API key for the architectural summary step:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Configure [`config.yml`](config.yml) to adjust what the skeleton includes
+(imports, functions, classes, directories to skip):
 
 ```yaml
 import:
@@ -37,9 +66,27 @@ classes:
   methods: true
 
 functions: true
-
-max_docstring_length: 120
 ```
+
+## Manual usage (without the skill)
+
+Generate code skeleton for the current directory:
+
+```bash
+PYTHONPATH=$(pwd) python3 -c "
+import asyncio; from pathlib import Path
+from src.py_summarizer.naive_skeleton import skeleton_pipeline
+asyncio.run(skeleton_pipeline(Path('.')))
+"
+```
+
+Generate call graph and architectural summary:
+
+```bash
+DATA_DIR=. PYTHONPATH=$(pwd) python3 scripts/generate_code_graph.py .
+```
+
+Output is written to `.analysis/` — `skeleton.md`, `graphs.json`, `ANALYSIS.md`.
 
 
 ### 2. Usage
@@ -89,6 +136,8 @@ This runs a smoke test that checks the health endpoint and submits a summarizati
 | `make run REPO=<url>` | Run CLI summarizer on a repository |
 | `make serve` | Start the FastAPI server with auto-reload |
 | `make test-api` | Run API smoke tests |
+| `make gh-login` | Authenticate with GitHub (`gh auth login`) |
+| `make publish` | Publish skill files to GitHub Gist |
 
 ## Project Structure
 
@@ -99,19 +148,6 @@ This runs a smoke test that checks the health endpoint and submits a summarizati
 - `scripts/main.py` - CLI entry point
 - `scripts/test_api.py` - API testing script
 - `data/` - Cloned repositories storage
-
-## Workflow
-
-On each request
-- process Clone the repository to `data/`
-- Index all files
-- Generate a code skeleton
-- Create an LLM-based summary
-
-test separately
-```shell
-DATA_DIR=./data PYTHONPATH=. python3 scripts/generate_skeleton.py https://github.com/microsoft/agent-lightning
-```
 
 
 ## Features

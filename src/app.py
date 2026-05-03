@@ -8,8 +8,8 @@ from pydantic import BaseModel, HttpUrl
 
 from src.llm.llm_adapter import DeepSeekLLMAdapter
 from src.llm.prompts import repo_summarizer_prompt
-from src.naive_skeleton import code_skeleton
-from src.utils import clone_repo, get_index, get_logger
+from src.py_summarizer.naive_skeleton import code_skeleton
+from src.py_summarizer.utils import clone_repo, get_index, get_logger
 
 logger = get_logger(__name__)
 

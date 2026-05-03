@@ -12,14 +12,14 @@ Environment variables:
     DATA_DIR: Directory where repositories are located (required)
     
 Example:
-    DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
+     PYTHONPATH=$(pwd)  DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
 """
 
 import os
 import sys
 from pathlib import Path
 
-from src.code_graph import (
+from src.py_summarizer.code_graph import (
     analyze_repository,
     export_graph,
     export_json,

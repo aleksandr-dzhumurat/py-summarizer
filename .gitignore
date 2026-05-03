@@ -212,3 +212,5 @@ data
 repo_summarizer.zip
 
 .DS_Store
+
+.analysis/

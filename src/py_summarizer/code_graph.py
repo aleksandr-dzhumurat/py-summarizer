@@ -1,39 +1,141 @@
 import ast
+import hashlib
 import json
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
-
-import networkx as nx
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from src.llm.llm_adapter import summarize_with_llm
-from src.utils import get_index, get_logger, get_path, short_doc
+from .naive_skeleton import check_class_important, check_function_important, extract_classes, ClassInfo, MethodInfo
+from .utils import get_index, get_logger, get_path
 
 logger = get_logger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Graph node
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CodeGraphNode:
+    name: str
+
+
+# ---------------------------------------------------------------------------
+# Directed graph
+# ---------------------------------------------------------------------------
+
+def _make_node(name: str) -> CodeGraphNode:
+    return CodeGraphNode(name=name)
+
+
+def _key(name: str) -> str:
+    return hashlib.md5(name.encode()).hexdigest()
+
+
+class DiGraph:
+    def __init__(self) -> None:
+        self._nodes: Dict[str, CodeGraphNode] = {}
+        self._succ: Dict[str, Set[str]] = defaultdict(set)
+        self._pred: Dict[str, Set[str]] = defaultdict(set)
+
+    def _register(self, name: str) -> str:
+        k = _key(name)
+        if k not in self._nodes:
+            self._nodes[k] = _make_node(name)
+        return k
+
+    def add_edge(self, source: str, target: str) -> None:
+        src = self._register(source)
+        tgt = self._register(target)
+        self._succ[src].add(tgt)
+        self._pred[tgt].add(src)
+
+    def number_of_nodes(self) -> int:
+        return len(self._nodes)
+
+    def number_of_edges(self) -> int:
+        return sum(len(s) for s in self._succ.values())
+
+    def nodes(self) -> List[str]:
+        return [n.name for n in self._nodes.values()]
+
+    def edges(self) -> Iterator[Tuple[str, str]]:
+        for src_key, tgt_keys in self._succ.items():
+            src = self._nodes[src_key].name
+            for tgt_key in tgt_keys:
+                yield src, self._nodes[tgt_key].name
+
+    def in_degree(self) -> Dict[str, int]:
+        return {n.name: len(self._pred.get(k, set())) for k, n in self._nodes.items()}
+
+    def out_degree(self) -> Dict[str, int]:
+        return {n.name: len(self._succ.get(k, set())) for k, n in self._nodes.items()}
+
+    def successors(self, name: str) -> Set[str]:
+        return {self._nodes[k].name for k in self._succ.get(_key(name), set())}
+
+
+def simple_cycles(graph: DiGraph) -> List[List[str]]:
+    """Find cycles via DFS back-edge detection."""
+    cycles: List[List[str]] = []
+    color: Dict[str, int] = {}
+    path: List[str] = []
+
+    def _dfs(node: str) -> None:
+        color[node] = 1
+        path.append(node)
+        for nb in graph.successors(node):
+            if color.get(nb) == 1:
+                cycles.append(path[path.index(nb):])
+            elif not color.get(nb):
+                _dfs(nb)
+        path.pop()
+        color[node] = 2
+
+    for node in graph.nodes():
+        if not color.get(node):
+            _dfs(node)
+
+    return cycles
+
+
+def dag_longest_path_length(graph: DiGraph) -> int:
+    """Longest path in a DAG via Kahn's topological sort + DP."""
+    remaining = dict(graph.in_degree())
+    queue: deque = deque(n for n, d in remaining.items() if d == 0)
+    topo: List[str] = []
+
+    while queue:
+        node = queue.popleft()
+        topo.append(node)
+        for nb in graph.successors(node):
+            remaining[nb] -= 1
+            if remaining[nb] == 0:
+                queue.append(nb)
+
+    if len(topo) != graph.number_of_nodes():
+        raise ValueError("Graph contains cycles — not a DAG")
+
+    dist: Dict[str, int] = {n: 0 for n in graph.nodes()}
+    for node in topo:
+        for nb in graph.successors(node):
+            if dist[node] + 1 > dist[nb]:
+                dist[nb] = dist[node] + 1
+
+    return max(dist.values()) if dist else 0
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
 
 @dataclass
 class CallEdge:
     source: str
     target: str
     type: str  # "calls", "imports", "inherits"
-
-
-@dataclass
-class MethodInfo:
-    name: str
-    signature: str
-    return_type: str
-    docstring: str
-
-
-@dataclass
-class ClassInfo:
-    name: str
-    bases: List[str]
-    methods: List[MethodInfo]
-    docstring: str
 
 
 @dataclass
@@ -44,6 +146,7 @@ class ModuleSkeleton:
     functions: List[str]
     imports_internal: List[str]
     imports_external: List[str]
+    name_imports: Dict[str, str]  # local_name -> source_module (from-import resolution)
     line_count: int
 
 
@@ -70,149 +173,6 @@ class RepoSummary:
     summary: str
 
 
-def check_class_important(node: ast.ClassDef) -> bool:
-    """Check if a class is important (should be included in skeleton).
-    
-    A class is considered important if:
-    1. Its name doesn't start with underscore (public API)
-    2. AND it meets at least one of:
-       - Has a docstring (documented)
-       - Has public methods
-       - Has base classes (inheritance-based)
-    
-    This filters out empty/trivial classes and internal implementation details.
-    """
-    if node.name.startswith("_"):
-        return False
-    
-    has_docstring = ast.get_docstring(node) is not None
-    has_bases = len(node.bases) > 0
-    
-    public_methods = [
-        item for item in node.body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and not item.name.startswith("_")
-    ]
-    
-    return has_docstring or len(public_methods) > 0 or has_bases
-
-
-def _is_boilerplate(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Identify low-information boilerplate functions.
-    
-    Boilerplate functions are those with little semantic value:
-    - Simple getters/setters with minimal logic
-    - Property decorators
-    - Magic methods (__str__, __repr__, etc.)
-    - Pass-through wrappers with single return
-    """
-    # Trivial getters/setters
-    if func.name.startswith("get_") or func.name.startswith("set_"):
-        if len(func.body) <= 2:  # just return or assignment
-            return True
-    
-    # Property decorators (usually simple)
-    if any(isinstance(d, ast.Name) and d.id == "property" for d in func.decorator_list):
-        return True
-    
-    # __str__, __repr__ (predictable)
-    if func.name in ["__str__", "__repr__", "__hash__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]:
-        return True
-    
-    # Pass-through wrappers - single return statement
-    if len(func.body) == 1 and isinstance(func.body[0], ast.Return):
-        return True
-    
-    return False
-
-
-def check_function_important(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    """Check if a function is important (should be included in skeleton).
-    
-    A function is considered important if:
-    1. Its name doesn't start with underscore (public API)
-    2. AND it's not boilerplate code
-    3. AND it meets at least one of:
-       - Has a docstring (documented)
-       - Has type annotations (typed API)
-    
-    This filters out private/internal functions, boilerplate code, and undocumented helpers.
-    """
-    if node.name.startswith("_"):
-        return False
-    
-    if _is_boilerplate(node):
-        return False
-    
-    has_docstring = ast.get_docstring(node) is not None
-    has_annotations = node.returns is not None or any(arg.annotation for arg in node.args.args)
-    
-    return has_docstring or has_annotations
-
-
-def _format_arguments(args: ast.arguments) -> str:
-    parts: List[str] = []
-
-    posonly = getattr(args, "posonlyargs", [])
-    for arg in posonly:
-        parts.append(arg.arg)
-    if posonly:
-        parts.append("/")
-
-    for arg in args.args:
-        parts.append(arg.arg)
-
-    if args.vararg:
-        parts.append("*" + args.vararg.arg)
-
-    for arg in args.kwonlyargs:
-        parts.append(arg.arg)
-
-    if args.kwarg:
-        parts.append("**" + args.kwarg.arg)
-
-    return ", ".join(parts)
-
-
-def _format_return_type(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    if node.returns is None:
-        return ""
-    return ast.unparse(node.returns)
-
-
-def extract_classes(tree: ast.AST) -> List[ClassInfo]:
-    """Extract class information from AST."""
-    classes = []
-    classes_candidates = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-    for node in classes_candidates:
-        if not check_class_important(node):
-            logger.info(node.name)
-            continue
-
-        methods: List[MethodInfo] = []
-        for method_node in node.body:
-            if not isinstance(method_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-
-            signature = _format_arguments(method_node.args)
-            return_type = _format_return_type(method_node)
-            methods.append(
-                MethodInfo(
-                    name=method_node.name,
-                    signature=signature,
-                    return_type=return_type,
-                    docstring=short_doc(method_node),
-                )
-            )
-
-        bases = [ast.unparse(b) for b in node.bases]
-        docstring = short_doc(node, max_len=150)
-
-        classes.append(ClassInfo(name=node.name, bases=bases, methods=methods, docstring=docstring))
-
-    return classes
-
-
 def extract_functions(tree: ast.AST) -> List[str]:
     """Extract top-level function names from AST."""
     functions = []
@@ -225,7 +185,7 @@ def extract_functions(tree: ast.AST) -> List[str]:
             continue
 
         if not check_function_important(node):
-            logger.info(node.name)
+            logger.debug(node.name)
             continue
 
         functions.append(node.name)
@@ -245,14 +205,16 @@ def extract_file(py_file: Path, repo_root: Path) -> Optional[ModuleSkeleton]:
     classes = extract_classes(tree)
     functions = extract_functions(tree)
     internal, external = _extract_imports(tree, repo_root)
+    name_imports = _extract_name_imports(tree, repo_root)
 
     return ModuleSkeleton(
-        file=str(py_file.relative_to(repo_root)),
+        file=str(py_file.resolve().relative_to(repo_root)),
         module_name=module_name,
         classes=classes,
         functions=functions,
         imports_internal=internal,
         imports_external=external,
+        name_imports=name_imports,
         line_count=source.count("\n"),
     )
 
@@ -357,10 +319,10 @@ def extract_call_edges(py_file: Path, repo_root: Path) -> List[CallEdge]:
             for method in node.body:
                 if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if node.name not in important_class_names:
-                        logger.info(node.name)
+                        logger.debug(node.name)
                         continue
                     if not check_function_important(method):
-                        logger.info(method.name)
+                        logger.debug(method.name)
                         continue
                     
                     caller = f"{module_name}.{method.name}"
@@ -374,7 +336,7 @@ def extract_call_edges(py_file: Path, repo_root: Path) -> List[CallEdge]:
         
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if not check_function_important(node):
-                logger.info(node.name)
+                logger.debug(node.name)
                 continue
             
             caller = f"{module_name}.{node.name}"
@@ -414,6 +376,31 @@ def _extract_imports(tree: ast.AST, repo_root: Path) -> Tuple[List[str], List[st
     return list(set(internal)), list(set(external))
 
 
+def _extract_name_imports(tree: ast.AST, repo_root: Path) -> Dict[str, str]:
+    """Return {local_name: source_module} for internal from-imports.
+
+    Covers `from src.foo import Bar, baz` → {"Bar": "src.foo", "baz": "src.foo"}.
+    Star imports and stdlib/external imports are skipped.
+    """
+    stdlib = __import__("sys").stdlib_module_names
+    result: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.module):
+            continue
+        root_pkg = node.module.split(".")[0]
+        if root_pkg in stdlib:
+            continue
+        candidate = repo_root / node.module.replace(".", "/")
+        if not (candidate.with_suffix(".py").exists() or (candidate / "__init__.py").exists()):
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local_name = alias.asname or alias.name
+            result[local_name] = node.module
+    return result
+
+
 def _expr_to_name(expr: ast.AST, class_name: Optional[str] = None) -> Optional[str]:
     if isinstance(expr, ast.Name):
         # Replace "self" with actual class name if provided
@@ -440,7 +427,7 @@ def _get_call_name(node: ast.Call, class_name: Optional[str] = None) -> Optional
 
 
 def _path_to_module(py_file: Path, repo_root: Path) -> str:
-    rel = py_file.relative_to(repo_root)
+    rel = py_file.resolve().relative_to(repo_root)
     parts = list(rel.parts)
     if parts[-1] == "__init__.py":
         parts = parts[:-1]
@@ -461,23 +448,61 @@ def find_entry_points(repo_root: Path) -> List[str]:
     return entries
 
 
-def build_call_graph(edges: List[CallEdge]) -> nx.DiGraph:
-    graph = nx.DiGraph()
+def extract_inheritance_edges(skeletons: List[ModuleSkeleton]) -> List[CallEdge]:
+    """Emit one CallEdge(type='inherits') per base class per class in each skeleton."""
+    edges = []
+    for sk in skeletons:
+        for cls in sk.classes:
+            for base in cls.bases:
+                edges.append(CallEdge(f"{sk.module_name}.{cls.name}", base, "inherits"))
+    return edges
+
+
+def build_call_graph(edges: List[CallEdge]) -> DiGraph:
+    graph = DiGraph()
     for edge in edges:
-        if edge.type == "calls":
+        if edge.type in ("calls", "inherits"):
             graph.add_edge(edge.source, edge.target)
     return graph
 
 
-def build_import_graph(skeletons: List[ModuleSkeleton]) -> nx.DiGraph:
-    graph = nx.DiGraph()
+def resolve_call_edges(edges: List[CallEdge], skeletons: List[ModuleSkeleton]) -> List[CallEdge]:
+    """Rewrite unqualified callee names to fully-qualified module.name targets.
+
+    For each call edge where the callee is a bare name (e.g. "get_subgraph"),
+    look up the caller module's from-import map. If the name was imported from
+    an internal module N, rewrite the target to "N.get_subgraph".
+
+    Example:
+        src.app imports `from src.retrieval import get_subgraph`
+        edge (src.app.endpoint, "get_subgraph") → (src.app.endpoint, "src.retrieval.get_subgraph")
+    """
+    name_imports: Dict[str, Dict[str, str]] = {sk.module_name: sk.name_imports for sk in skeletons}
+
+    resolved = []
+    for edge in edges:
+        if edge.type != "calls":
+            resolved.append(edge)
+            continue
+        caller_module = edge.source.rsplit(".", 1)[0]
+        imports = name_imports.get(caller_module, {})
+        base = edge.target.split(".")[0]
+        if base in imports:
+            resolved.append(CallEdge(edge.source, f"{imports[base]}.{edge.target}", edge.type))
+        else:
+            resolved.append(edge)
+    return resolved
+
+
+def build_import_graph(skeletons: List[ModuleSkeleton]) -> DiGraph:
+    graph = DiGraph()
     for skeleton in skeletons:
         for dep in skeleton.imports_internal:
             graph.add_edge(skeleton.module_name, dep)
     return graph
 
 
-def analyze_call_graph(graph: nx.DiGraph) -> GraphAnalysis:
+def analyze_call_graph(graph: DiGraph) -> GraphAnalysis:
     if graph.number_of_nodes() == 0:
         return GraphAnalysis([], [], [], 0, 0, 0)
 
@@ -489,12 +514,12 @@ def analyze_call_graph(graph: nx.DiGraph) -> GraphAnalysis:
     most_called = sorted(in_deg, key=in_deg.get, reverse=True)[:10]
 
     try:
-        cycles = list(nx.simple_cycles(graph))
+        cycles = list(simple_cycles(graph))
     except Exception:
         cycles = []
 
     try:
-        max_depth = nx.dag_longest_path_length(graph)
+        max_depth = dag_longest_path_length(graph)
     except Exception:
         max_depth = -1
 
@@ -508,7 +533,7 @@ def analyze_call_graph(graph: nx.DiGraph) -> GraphAnalysis:
     )
 
 
-def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[RepoSummary, nx.DiGraph, nx.DiGraph]:
+def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[RepoSummary, DiGraph, DiGraph]:
     repo_root = Path(repo_path).resolve()
 
     if not repo_root.exists():
@@ -539,17 +564,25 @@ def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[R
 
     print(f"Extracted {len(skeletons)} modules, {len(call_edges)} call edges")
 
-    print("Step 2: Building call and import graphs...")
-    call_graph = build_call_graph(call_edges)
+    print("Step 2: Resolving call edge targets...")
+    resolved_edges = resolve_call_edges(call_edges, skeletons)
+    resolved_count = sum(1 for a, b in zip(call_edges, resolved_edges) if a.target != b.target)
+    print(f"Resolved {resolved_count}/{len(call_edges)} edges to fully-qualified targets")
+
+    inheritance_edges = extract_inheritance_edges(skeletons)
+    print(f"Extracted {len(inheritance_edges)} inheritance edges")
+
+    print("Step 3: Building call and import graphs...")
+    call_graph = build_call_graph(resolved_edges + inheritance_edges)
     import_graph = build_import_graph(skeletons)
 
     print(f"Call graph: {call_graph.number_of_nodes()} nodes, {call_graph.number_of_edges()} edges")
     print(f"Import graph: {import_graph.number_of_nodes()} nodes, {import_graph.number_of_edges()} edges")
 
-    print("Step 3: Analyzing call graph...")
+    print("Step 4: Analyzing call graph...")
     graph_analysis = analyze_call_graph(call_graph)
 
-    print("Step 4: Computing statistics...")
+    print("Step 5: Computing statistics...")
     total_lines = sum(s.line_count for s in skeletons)
     total_functions = sum(len(s.functions) for s in skeletons)
     total_classes = sum(len(s.classes) for s in skeletons)
@@ -559,7 +592,7 @@ def analyze_repository(repo_path: str, api_key: Optional[str] = None) -> Tuple[R
     top_deps = [dep for dep, _ in dep_counts.most_common(20)]
     entry_points = find_entry_points(repo_root)
 
-    print("Step 5: Generating LLM summary...")
+    print("Step 6: Generating LLM summary...")
     summary = summarize_with_llm(skeletons, graph_analysis, top_deps, entry_points, api_key)
 
     repo_summary = RepoSummary(
@@ -645,10 +678,9 @@ def export_markdown(summary: RepoSummary, output_path: Path) -> None:
     print(f"Exported Markdown to: {output_path}")
 
 
-def export_graph(call_graph: nx.DiGraph, import_graph: nx.DiGraph, output_path: Path) -> None:
+def export_graph(call_graph: DiGraph, import_graph: DiGraph, output_path: Path) -> None:
     """Export graphs with full edge metadata (source, target, type)."""
-    def _graph_to_dict(graph: nx.DiGraph, edge_type: str) -> dict:
-        """Convert NetworkX graph to dict with nodes and typed edges."""
+    def _graph_to_dict(graph: DiGraph, edge_type: str) -> dict:
         edges = []
         for source, target in graph.edges():
             edges.append({

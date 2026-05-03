@@ -15,18 +15,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Set
 
-from .code_graph import check_function_important, extract_classes
-from .utils import (
-    clean_markdown_text,
-    get_absolute_imports_flag,
-    get_class_definitions_flag,
-    get_class_methods_flag,
-    get_functions_flag,
-    get_logger,
-    get_path,
-    get_relative_imports_flag,
-    short_doc,
-)
+try:
+    from .utils import (
+        clean_markdown_text,
+        get_absolute_imports_flag,
+        get_class_definitions_flag,
+        get_class_methods_flag,
+        get_functions_flag,
+        get_index,
+        get_logger,
+        get_path,
+        get_relative_imports_flag,
+        short_doc,
+    )
+except ImportError:
+    from utils import (  # type: ignore[no-redef]
+        clean_markdown_text,
+        get_absolute_imports_flag,
+        get_class_definitions_flag,
+        get_class_methods_flag,
+        get_functions_flag,
+        get_index,
+        get_logger,
+        get_path,
+        get_relative_imports_flag,
+        short_doc,
+    )
 
 logger = get_logger(__name__)
 
@@ -52,6 +66,83 @@ class SkeletonEntry:
     source: str
     file_type: str  # 'doc' or 'code'
     content: List[Part]
+
+
+@dataclass
+class MethodInfo:
+    name: str
+    signature: str
+    return_type: str
+    docstring: str
+
+
+@dataclass
+class ClassInfo:
+    name: str
+    bases: List[str]
+    methods: List[MethodInfo]
+    docstring: str
+
+
+def check_class_important(node: ast.ClassDef) -> bool:
+    if node.name.startswith("_"):
+        return False
+    has_docstring = ast.get_docstring(node) is not None
+    has_bases = len(node.bases) > 0
+    public_methods = [
+        item for item in node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not item.name.startswith("_")
+    ]
+    return has_docstring or len(public_methods) > 0 or has_bases
+
+
+def _is_boilerplate(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    if func.name.startswith("get_") or func.name.startswith("set_"):
+        if len(func.body) <= 2:
+            return True
+    if any(isinstance(d, ast.Name) and d.id == "property" for d in func.decorator_list):
+        return True
+    if func.name in ["__str__", "__repr__", "__hash__", "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]:
+        return True
+    if len(func.body) == 1 and isinstance(func.body[0], ast.Return):
+        return True
+    return False
+
+
+def check_function_important(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    if node.name.startswith("_"):
+        return False
+    if _is_boilerplate(node):
+        return False
+    has_docstring = ast.get_docstring(node) is not None
+    has_annotations = node.returns is not None or any(arg.annotation for arg in node.args.args)
+    return has_docstring or has_annotations
+
+
+def extract_classes(tree: ast.AST) -> List[ClassInfo]:
+    """Extract class information from AST."""
+    classes = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if not check_class_important(node):
+            continue
+        methods: List[MethodInfo] = []
+        for method_node in node.body:
+            if not isinstance(method_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            signature = _format_arguments(method_node.args)
+            return_type = ast.unparse(method_node.returns) if method_node.returns else ""
+            methods.append(MethodInfo(
+                name=method_node.name,
+                signature=signature,
+                return_type=return_type,
+                docstring=short_doc(method_node),
+            ))
+        bases = [ast.unparse(b) for b in node.bases]
+        classes.append(ClassInfo(name=node.name, bases=bases, methods=methods, docstring=short_doc(node, max_len=150)))
+    return classes
 
 
 def _format_arguments(args: ast.arguments) -> str:
@@ -251,8 +342,14 @@ def import_summarize(import_parts: List[Part]) -> str:
             name = text
         if name:
             packages.add(name.split(".")[0])
-    summary = ", ".join(sorted(packages))
-    return f"PACKAGES: {summary}" if summary else ""
+    
+    if not packages:
+        return ""
+        
+    lines = ["# PACKAGES\n"]
+    for pkg in sorted(packages):
+        lines.append(f"- {pkg}")
+    return "\n".join(lines)
 
 
 def _should_include_part(part: Part, flags: dict) -> bool:
@@ -291,72 +388,104 @@ def filter_rows(rows: List[SkeletonEntry]) -> List[SkeletonEntry]:
     return filtered
 
 
-def _render_rows(rows: List[SkeletonEntry], header: str = "") -> str:
-    """Render rows into valid YAML format with folded block scalars for docstrings."""
+def _get_relative_path(source: str, root_dir: str | None) -> str:
+    """Get path relative to root_dir, falling back to source unchanged."""
+    if not root_dir:
+        return source
+    try:
+        return str(Path(source).relative_to(root_dir))
+    except ValueError:
+        root_str = str(root_dir).rstrip("/") + "/"
+        if source.startswith(root_str):
+            return source[len(root_str):]
+        return source
+
+
+def _render_rows(rows: List[SkeletonEntry], header: str = "", root_dir: str | None = None) -> str:
+    """Render rows into Markdown format with hierarchical path-based headers."""
     lines: List[str] = []
     if header:
         lines.append(header)
         lines.append("")
-    
+
+    emitted_dirs: set = set()
+
     for row in rows:
         if row.content and ': (none)' in row.content[0].text:
             continue
-        prefix = "File" if row.file_type == "code" else "Documentation"
-        lines.append(f"{prefix}: {row.source}")
-        
-        # Group parts by type
-        by_type = {
-            PART_DOCSTRING: [],
-            "imports": [],
-            PART_FUNCTION: [],
-            PART_CLASS: [],
-        }
-        
+
+        # Group parts by type, nesting methods under their class
+        docstrings: List[str] = []
+        imports: List[str] = []
+        classes_order: List[str] = []
+        classes_dict: dict = {}
+        methods_by_class: dict = {}
+        top_level_funcs: List[str] = []
+
         for p in row.content:
             if p.type == PART_DOCSTRING:
-                by_type[PART_DOCSTRING].append(p.text)
+                docstrings.append(p.text)
             elif p.type in (PART_IMPORT_REL, PART_IMPORT_ABS):
-                by_type["imports"].append(p.text)
-            elif p.type == PART_FUNCTION:
-                by_type[PART_FUNCTION].append(p.text)
+                imports.append(p.text)
             elif p.type == PART_CLASS:
-                by_type[PART_CLASS].append(p.text)
-        
-        # Render each section as YAML
-        # Docstring: use folded block scalar (>) for long content, otherwise inline
-        if by_type[PART_DOCSTRING]:
-            docstring_text = " ".join(by_type[PART_DOCSTRING])
-            if len(docstring_text) > 120:
-                lines.append("Docstring: >")
-                # Wrap text at ~80 chars while preserving word boundaries
-                words = docstring_text.split()
-                current_line = []
-                for word in words:
-                    test_line = " ".join(current_line + [word])
-                    if len(test_line) > 80 and current_line:
-                        lines.append(f"  {' '.join(current_line)}")
-                        current_line = [word]
+                class_name = p.text.split(":")[0].strip()
+                classes_dict[class_name] = p.text
+                classes_order.append(class_name)
+                methods_by_class[class_name] = []
+            elif p.type == PART_FUNCTION:
+                func_before_paren = p.text.split("(")[0]
+                if "." in func_before_paren:
+                    class_name = func_before_paren.split(".")[0]
+                    if class_name in methods_by_class:
+                        methods_by_class[class_name].append(p.text)
                     else:
-                        current_line.append(word)
-                if current_line:
-                    lines.append(f"  {' '.join(current_line)}")
-            else:
-                lines.append(f"Docstring: {docstring_text!r}")
-        
-        if by_type["imports"]:
-            lines.append("Imports:")
-            lines.extend(f"  - {im}" for im in by_type["imports"])
-        
-        if by_type[PART_CLASS]:
-            lines.append("Classes:")
-            lines.extend(f"  - {c}" for c in by_type[PART_CLASS])
-        
-        if by_type[PART_FUNCTION]:
-            lines.append("Functions:")
-            lines.extend(f"  - {f}" for f in by_type[PART_FUNCTION])
-        
+                        top_level_funcs.append(p.text)
+                else:
+                    top_level_funcs.append(p.text)
+
+        if not any([docstrings, imports, classes_order, top_level_funcs]):
+            continue
+
+        rel = _get_relative_path(row.source, root_dir)
+        parts = Path(rel).parts
+
+        # Emit a header for each directory component not yet seen
+        for depth in range(1, len(parts)):
+            dir_key = "/".join(parts[:depth])
+            if dir_key not in emitted_dirs:
+                emitted_dirs.add(dir_key)
+                lines.append(f"{'#' * depth} {parts[depth - 1]}")
+                lines.append("")
+
+        # File header at the depth matching its position in the path
+        file_depth = len(parts)
+        lines.append(f"{'#' * file_depth} {rel}")
         lines.append("")
-    
+
+        if docstrings:
+            lines.append(" ".join(docstrings))
+            lines.append("")
+
+        if imports:
+            lines.append("**Imports**")
+            for im in imports:
+                lines.append(f"- `{im}`")
+            lines.append("")
+
+        if classes_order:
+            lines.append("**Classes**")
+            for class_name in classes_order:
+                lines.append(f"- {classes_dict[class_name]}")
+                for method in methods_by_class.get(class_name, []):
+                    lines.append(f"  - {method}")
+            lines.append("")
+
+        if top_level_funcs:
+            lines.append("**Functions**")
+            for f in top_level_funcs:
+                lines.append(f"- {f}")
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -387,7 +516,57 @@ def code_skeleton(index: List[dict], root_dir: str | None = None) -> str:
     
     # Apply filtering and render
     rows = filter_rows(rows)
-    return _render_rows(rows, header=header)
+    return _render_rows(rows, header=header, root_dir=root_dir)
 
 
-__all__ = ["code_skeleton", "process_code", "process_doc", "SkeletonEntry", "Part"]
+def skeleton_pipeline(repo_path) -> int:
+    """Index repo directory and generate skeleton.md into .analysis/.
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    try:
+        indexed = get_index(str(repo_path))
+        print(f"✓ Indexed {len(indexed)} files")
+        if not indexed:
+            print("⚠ No files to process")
+            return 1
+    except Exception as e:
+        logger.error(f"Indexing failed: {e}")
+        return 1
+
+    try:
+        skeleton_text = code_skeleton(indexed, root_dir=str(repo_path))
+
+        analysis_dir = repo_path / ".analysis"
+        analysis_dir.mkdir(exist_ok=True)
+        skeleton_file = analysis_dir / "skeleton.md"
+        skeleton_file.write_text(skeleton_text, encoding="utf-8")
+        print(f"\n✓ Skeleton saved to: {skeleton_file}")
+
+    except Exception as e:
+        logger.error(f"Skeleton generation failed: {e}")
+        return 1
+
+    return 0
+
+
+def main() -> int:
+    """Run skeleton generation on a directory (default: current directory).
+
+    Usage:
+        python3 -m src.py_summarizer.naive_skeleton [PATH]
+    """
+    import sys
+    repo_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
+    if not repo_path.is_dir():
+        print(f"Error: not a directory: {repo_path}", file=sys.stderr)
+        return 1
+    return skeleton_pipeline(repo_path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["code_skeleton", "skeleton_pipeline", "process_code", "process_doc", "SkeletonEntry", "Part"]

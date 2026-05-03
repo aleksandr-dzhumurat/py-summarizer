@@ -1,11 +1,6 @@
 fastapi>=0.95.0
 uvicorn[standard]
 httpx>=0.24.0
-pyan3>=0.11.0
-networkx>=3.1
-python-dotenv>=1.0.0
 pydantic>=2.0.0
-typing-extensions>=4.0.0
 PyYAML>=6.0.0
- 
 tiktoken>=0.4.0
