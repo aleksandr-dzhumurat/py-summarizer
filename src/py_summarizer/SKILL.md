@@ -7,9 +7,9 @@ description: >
   "generate code skeleton", "map function dependencies",
   "who calls function X", or "understand how this project is structured".
 license: MIT
-allowed-tools: "Bash(python3:*)"
+allowed-tools: "Bash(*)"
 metadata:
-  version: 2.0.0
+  version: 2.1.0
   category: developer-tools
   tags: [code-analysis, call-graph, skeleton, inheritance]
 ---
@@ -17,46 +17,50 @@ metadata:
 # Repo Summarizer
 
 Analyzes the repository in the current working directory.
-All output is written to `.analysis/` inside the project root.
+All output is written to `.analysis/` inside the analyzed repo.
+
+The skill is installed at `~/.claude/skills/py_summarizer/`.
 
 ---
 
-## Step 1 — Generate code skeleton
-
-Indexes all Python and documentation files and writes a hierarchical
-Markdown summary of every file's imports, classes, and functions.
+## Step 0 — Create environment
 
 ```bash
-PYTHONPATH=. python3 -m src.py_summarizer.naive_skeleton [PATH]
+SKILL_DIR="$HOME/.claude/skills/py_summarizer"
+python3 -m venv /tmp/py-summarizer-venv && source /tmp/py-summarizer-venv/bin/activate && pip install -r "$SKILL_DIR/skill_requirements.txt" -q
 ```
 
-Omit `PATH` to analyze the current directory. Output: `.analysis/skeleton.md`
+---
 
-To analyze a remote GitHub repository (clones first):
+## Step 1 — Generate code skeleton only
+
+Indexes all Python files and writes a hierarchical Markdown summary of every
+file's imports, classes, and functions.
 
 ```bash
-DATA_DIR=./data PYTHONPATH=. python3 scripts/generate_skeleton.py https://github.com/owner/repo
+source /tmp/py-summarizer-venv/bin/activate
+PYTHONPATH="$HOME/.claude/skills" python3 -m py_summarizer.naive_skeleton .
 ```
+
+Output: `.analysis/skeleton.md`
 
 ---
 
 ## Step 2 — Generate call graph and full analysis
 
-Builds a resolved call graph (function calls + inheritance edges) and an
-import graph, then generates a structured JSON, Markdown report, and
-LLM-produced architectural summary.
+Builds a resolved call graph (function calls + inheritance edges), import
+graph, and a fully-rendered LLM summarization prompt.
 
 ```bash
-DATA_DIR=./data PYTHONPATH=. python3 scripts/generate_code_graph.py owner/repo [--api-key YOUR_KEY]
+source /tmp/py-summarizer-venv/bin/activate
+PYTHONPATH="$HOME/.claude/skills" python3 -m py_summarizer .
 ```
 
-`ANTHROPIC_API_KEY` is read from the environment if `--api-key` is omitted.
-
-Outputs written to `<repo>/.analysis/`:
-- `skeleton.md` — hierarchical code skeleton
+Outputs written to `.analysis/`:
 - `summary.json` — machine-readable stats and graph analysis
 - `ANALYSIS.md` — human-readable Markdown report
 - `graphs.json` — call and import graph edges (source, target, type)
+- `rendered_prompt.txt` — fully-rendered LLM summarization prompt
 
 ---
 
@@ -64,25 +68,23 @@ Outputs written to `<repo>/.analysis/`:
 
 | Edge type  | Example                                      |
 |------------|----------------------------------------------|
-| `calls`    | `src.app.endpoint` → `src.py_summarizer.code_graph.analyze_repository` |
-| `inherits` | `src.py_summarizer.code_graph.DiGraph` → `object` |
-| `imports`  | `src.app` → `src.py_summarizer.code_graph`   |
+| `calls`    | `app.endpoint` → `py_summarizer.code_graph.analyze_repository` |
+| `inherits` | `py_summarizer.code_graph.DiGraph` → `object` |
+| `imports`  | `app` → `py_summarizer.code_graph`           |
 
 Call edges are **symbol-resolved**: bare names imported via `from X import Y`
-are rewritten to their source module before the graph is built, so
-`get_subgraph` becomes `src.py_summarizer.code_graph.get_subgraph`.
+are rewritten to their source module before the graph is built.
 
 ---
 
-## Package layout
+## Package layout (installed skill)
 
 ```
-src/py_summarizer/
-    naive_skeleton.py   # AST skeleton extraction + skeleton_pipeline entry point
+~/.claude/skills/py_summarizer/
+    __main__.py         # python3 -m py_summarizer entry point
+    naive_skeleton.py   # AST skeleton extraction
     code_graph.py       # DiGraph, call/import/inheritance graph, analyze_repository
-    utils.py            # logging, config loading, file indexing, clone_repo
-
-scripts/
-    generate_skeleton.py    # clone + skeleton only
-    generate_code_graph.py  # full analysis (skeleton + graphs + LLM summary)
+    utils.py            # logging, config, file indexing, generate_summarization_prompt
+    config.json         # skipped dirs, file extensions, skeleton options
+    skill_requirements.txt
 ```
