@@ -2,20 +2,9 @@
 
 A tool that clones GitHub repositories, analyzes their structure, and generates LLM-based summaries.
 
-Supports deployment as either a FastAPI service or an agent skill.
-
-Summarizing any python module
-
-```shell
-PYTHONPATH=$(pwd)/src python3 -m py_summarizer.naive_skeleton /Users/adzhumurat/PycharmProjects/ai_product_engineer/src/assistant
-```
-
 # Agentic skill
 
-The `repo-summarizer` skill teaches Claude to analyze any Python repository
-in the current working directory: generating a structural code skeleton,
-call/import graphs, and an LLM architectural summary — without loading raw
-source files into context.
+The `py_summarizer` skill teaches Claude to analyze any Python repository: generating a structural code skeleton, call/import graphs, and an LLM architectural summary — without loading raw source files into context.
 
 ### Install from Gist (no clone needed)
 
@@ -27,7 +16,7 @@ for f in SKILL.md naive_skeleton.py utils.py code_graph.py __main__.py config.js
 done
 ```
 
-Restart Claude Code after installation. Then ask:
+Restart Claude Code (just open a new chat) after installation. Then ask:
 > "Analyze this codebase" or "Summarize the repo"
 
 ### Install from source
@@ -42,10 +31,10 @@ bash install.sh
 pip install -r requirements.txt
 ```
 
-Set your Anthropic API key for the architectural summary step:
+Set your API key for the architectural summary step:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export NEBIUS_API_KEY=****
 ```
 
 Configure [`config.json`](src/py_summarizer/config.json) to adjust what the skeleton includes
@@ -61,10 +50,10 @@ Configure [`config.json`](src/py_summarizer/config.json) to adjust what the skel
 
 ## Manual usage (without the skill)
 
-Generate code skeleton for the current directory:
+Summarizing any python module
 
-```bash
-PYTHONPATH=$(pwd)/src python3 -m py_summarizer.naive_skeleton .
+```shell
+PYTHONPATH=$(pwd)/src python3 -m py_summarizer.naive_skeleton /path/to/your/python/module
 ```
 
 Generate call graph and architectural summary:
@@ -73,10 +62,12 @@ Generate call graph and architectural summary:
 PYTHONPATH=$(pwd)/src DATA_DIR=./data python3 scripts/generate_code_graph.py google/adk-python
 ```
 
-Output is written to `.analysis/` — `skeleton.md`, `graphs.json`, `ANALYSIS.md`.
+Output is written to `.analysis/` — `summary.json`, `ANALYSIS.md`, `graphs.json`, `rendered_prompt.txt`.
 
 
-### 2. Usage
+### HTTP service usage
+
+Supports deployment as either a FastAPI service (not only via agent skill).
 
 Start the FastAPI server:
 
@@ -139,11 +130,9 @@ This runs a smoke test that checks the health endpoint and submits a summarizati
 
 - Clone and analyze GitHub repositories
 - Generate code structure skeletons
-- Create AI-powered summaries using DeepSeek LLM
+- Create AI-powered summaries using Anthropic Claude
 - FastAPI REST API for programmatic access
 - CLI script for direct execution
-
-DeepSeek-V3.2 was chosen for its excellent performance on code understanding tasks and cost-effectiveness compared to other frontier models.
 
 ## Requirements
 
